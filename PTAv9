@@ -1,0 +1,562 @@
+import tkinter as tk
+import tkinter.messagebox as messagebox
+from tkinter import filedialog, Toplevel, Scrollbar
+from PIL import Image, ImageTk, ImageEnhance, ImageFilter, ImageOps
+import os
+from datetime import datetime
+import json
+
+FILLED = "■"
+EMPTY = "□"
+
+LILAC = "#C8A2C8"
+DARK_LILAC = "#4B3869"
+LILAC_HOVER = "#F3E8FF"
+
+
+class CustomScale(tk.Scale):
+    def __init__(self, *args, **kwargs):
+        self.normal_color = kwargs.pop("normal_color", LILAC)
+        self.hover_color = kwargs.pop("hover_color", LILAC_HOVER)
+        super().__init__(*args, **kwargs)
+        self.configure(troughcolor=DARK_LILAC, bg="#222222", fg="#eee",
+                       highlightthickness=0, bd=0, relief="flat",
+                       sliderrelief="flat", sliderlength=25,
+                       borderwidth=0, length=130)
+        self.bind("<Enter>", self.on_enter)
+        self.bind("<Leave>", self.on_leave)
+        self.update_slider_color(self.normal_color)
+
+    def update_slider_color(self, color):
+        self.config(activebackground=color)
+
+    def on_enter(self, event):
+        self.update_slider_color(self.hover_color)
+
+    def on_leave(self, event):
+        self.update_slider_color(self.normal_color)
+
+
+class PixelArtApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Photo To ASCII ")
+        self.root.configure(bg="#222222")
+
+        # --- Все переменные в начале ---
+        self.image = None
+        self.processed_image = None
+        self.ascii_text = ""
+        self.use_text_widget = False
+        self.current_preview_img_full = None
+        self.current_preview_img = None
+        self.saved_images = []
+
+        self.invert_var = tk.BooleanVar(value=False)
+        self.grid_size_var = tk.IntVar(value=50)
+        self.brightness_var = tk.DoubleVar(value=1.0)
+        self.contrast_var = tk.DoubleVar(value=1.0)
+        self.threshold_var = tk.IntVar(value=128)
+        self.sharpness_var = tk.DoubleVar(value=1.0)
+        self.edge_enhance_var = tk.DoubleVar(value=0.0)
+
+        # --- Верхняя панель ---
+        top_frame = tk.Frame(root, bg="#222222")
+        top_frame.pack(side="top", fill="x", pady=10, padx=10)
+        buttons_frame = tk.Frame(top_frame, bg="#222222")
+        buttons_frame.grid(row=0, column=0, sticky="n")
+
+        # Кнопки размещаем в grid по 2 колонки
+        btn_upload = tk.Button(buttons_frame, text="Upload Image", command=self.load_image,
+                            bg="#175620", fg="#B1F5CE", relief="flat",
+                            font=("Arial", 13, "bold"), width=15, height=3)
+        btn_upload.grid(row=0, column=0, padx=5, pady=5)
+
+        toggle_btn = tk.Button(buttons_frame, text="Canvas/Text Toggle", command=self.toggle_view,
+                            bg="#333333", fg="#aaa", relief="flat",
+                            font=("Arial", 12, "bold"), width=18)
+        toggle_btn.grid(row=0, column=1, padx=25, pady=15)
+
+        invert_cb = tk.Checkbutton(buttons_frame, text="Invert Symbols", variable=self.invert_var,
+                                command=self.update_preview,
+                                bg="#222222", fg="#eee",
+                                activebackground="#222222", activeforeground="#eee",
+                                selectcolor="#222222", relief="flat",
+                                font=("Arial", 14, "bold"))
+        invert_cb.grid(row=1, column=1, padx=5, pady=5)
+
+        stretch_btn = tk.Button(
+            buttons_frame,
+            text="Stretch 1:1",
+            command=self.stretch_to_canvas,
+            bg="#333333",
+            fg="#aaa",
+            relief="flat",
+            font=("Arial", 11, "bold"),
+            width=12
+        )
+        stretch_btn.grid(row=3, column=0, padx=5, pady=5)
+
+        copy_btn = tk.Button(buttons_frame, text="Copy Text", command=self.copy_text,
+                            bg="#555", fg="#eee", relief="flat",
+                            font=("Arial", 11, "bold"), width=12)
+        copy_btn.grid(row=2, column=1, padx=5, pady=5)
+
+        save_btn = tk.Button(buttons_frame, text="Save Work", command=self.save_work,
+                            bg="#175620", fg="#B1F5CE", relief="flat",
+                            font=("Arial", 11, "bold"), width=12)
+        save_btn.grid(row=1, column=0, padx=5, pady=5)
+
+        self.view_saved_btn = tk.Button(
+            buttons_frame, text="View Saved",
+            command=lambda btn=None: self.view_saved_works(self.view_saved_btn),
+            bg="#333333", fg="#aaa", relief="flat",
+            font=("Arial", 11, "bold"), width=12
+        )
+        self.view_saved_btn.grid(row=2, column=0, padx=5, pady=5)
+
+        # Правая колонка — слайдеры
+        sliders_frame = tk.Frame(top_frame, bg="#222222")
+        sliders_frame.grid(row=0, column=1, padx=40, sticky="n")
+
+        self.create_vertical_slider_with_label(sliders_frame, "Grid Size", self.grid_size_var, 10, 127, self.update_preview, resolution=1)
+        self.create_vertical_slider_with_label(sliders_frame, "Brightness", self.brightness_var, 0.1, 2.0, self.update_preview, resolution=0.1)
+        self.create_vertical_slider_with_label(sliders_frame, "Contrast", self.contrast_var, 0.1, 2.0, self.update_preview, resolution=0.1)
+        self.create_vertical_slider_with_label(sliders_frame, "Threshold", self.threshold_var, 0, 255, self.update_preview, resolution=1)
+        self.create_vertical_slider_with_label(sliders_frame, "Sharpness", self.sharpness_var, 0.0, 3.0, self.update_preview, resolution=0.1)
+        self.create_vertical_slider_with_label(sliders_frame, "Edge Enhance", self.edge_enhance_var, 0.0, 2.0, self.update_preview, resolution=0.1)
+        # ---------------- Основная часть с превью и текстом ----------------
+        main_frame = tk.Frame(root, bg="#222222")
+        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        preview_frame = tk.LabelFrame(main_frame, text="Preview", fg="#eee", bg="#222222", bd=1, relief="solid",
+                                      labelanchor="n")
+        preview_frame.pack(side="left", fill="both", expand=False, padx=(0, 10))
+
+        self.preview_canvas = tk.Canvas(preview_frame, bg="#222222", highlightthickness=0, width=700, height=700)
+        self.preview_canvas.pack()
+
+        self.preview_label = tk.Label(self.preview_canvas, bg="#222222")
+        self.preview_label.place(x=0, y=0)
+
+        text_frame = tk.LabelFrame(main_frame, text="Generated Text", fg="#eee", bg="#222222", bd=1, relief="solid",
+                                   labelanchor="n")
+        text_frame.pack(side="left", fill="both", expand=False)
+
+        # Canvas для ascii
+        self.text_canvas = tk.Canvas(text_frame, bg="#111", highlightthickness=0, width=700, height=700)
+        self.text_canvas.pack()
+
+        # Text для ascii (скрыт изначально)
+        self.text_widget = tk.Text(text_frame, bg="#111", fg="#eee", font=("Courier New", 10),
+                                   width=100, height=50, wrap="none", bd=0, highlightthickness=0)
+        self.text_widget.pack_forget()
+
+        root.geometry("1400x950")
+        root.minsize(1400, 950)
+
+        self.current_preview_img = None
+        self.saved_images = []
+
+        if not os.path.exists("saved_works"):
+            os.makedirs("saved_works")
+
+        self.is_stretched = False  # Track stretch state
+        self.stretched_image = None  # Initialize stretched image
+
+        self.stretch_var = tk.StringVar(value="Stretch 1:1")
+        self.stretch_menu_btn = tk.Menubutton(
+            buttons_frame,
+            textvariable=self.stretch_var,
+            bg="#333333",
+            fg="#aaa",
+            relief="flat",
+            font=("Arial", 11, "bold"),
+            width=12,
+            direction="below"
+        )
+        self.stretch_menu = tk.Menu(self.stretch_menu_btn, tearoff=0, bg="#333333", fg="#aaa", font=("Arial", 10))
+        self.stretch_menu.add_command(label="Fit (keep aspect)", command=lambda: self.stretch_to_canvas("fit"))
+        self.stretch_menu.add_command(label="Fill (stretch 1:1)", command=lambda: self.stretch_to_canvas("fill"))
+        self.stretch_menu.add_command(label="Width (fit width)", command=lambda: self.stretch_to_canvas("width"))
+        self.stretch_menu.add_command(label="Height (fit height)", command=lambda: self.stretch_to_canvas("height"))
+        self.stretch_menu_btn.config(menu=self.stretch_menu)
+        self.stretch_menu_btn.grid(row=3, column=0, padx=5, pady=5)
+
+    def create_vertical_slider_with_label(self, parent, text, variable, from_, to, command, resolution=1.0):
+        frame = tk.Frame(parent, bg="#222222")
+        frame.pack(side="left", padx=8, pady=10, anchor="n")  # чуть меньше padx для компактности
+
+        label = tk.Label(frame, text=text, bg="#222222", fg="#eee", font=("Arial", 11, "bold"))
+        label.pack(pady=(0, 8))
+
+        slider = CustomScale(frame, variable=variable, from_=from_, to=to, orient="vertical",
+                             resolution=resolution, normal_color=LILAC, hover_color=LILAC_HOVER, length=130)
+        slider.pack()
+
+        slider.bind("<ButtonRelease-1>", lambda e: command())
+
+    def load_image(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg *.png *.jpeg *.bmp")])
+        if file_path:
+            self.image = Image.open(file_path).convert("RGB")
+            self.stretch_to_canvas("fit")  # Auto-update preview with the new image
+
+    def update_preview(self, stretched=None):
+        if self.image is None:
+            return
+
+        # Use stretched state if not explicitly specified
+        if stretched is None:
+            stretched = self.is_stretched
+
+        img_source = self.stretched_image if stretched and hasattr(self, 'stretched_image') else self.image
+
+        grid_size = self.grid_size_var.get()
+        brightness = self.brightness_var.get()
+        contrast = self.contrast_var.get()
+        sharpness = self.sharpness_var.get()
+        edge_enhance = self.edge_enhance_var.get()
+
+        orig_width, orig_height = img_source.size
+        ratio = min(grid_size / orig_width, grid_size / orig_height)
+        new_width = int(orig_width * ratio)
+        new_height = int(orig_height * ratio)
+        img_resized = img_source.resize((new_width, new_height), Image.LANCZOS)
+
+        img_small = Image.new("RGB", (grid_size, grid_size), (0, 0, 0))
+        paste_x = (grid_size - new_width) // 2
+        paste_y = (grid_size - new_height) // 2
+        img_small.paste(img_resized, (paste_x, paste_y))
+
+        img_small = ImageEnhance.Brightness(img_small).enhance(brightness)
+        img_small = ImageEnhance.Contrast(img_small).enhance(contrast)
+        img_small = ImageEnhance.Sharpness(img_small).enhance(sharpness)
+
+        if edge_enhance > 0:
+            edge_filter = ImageFilter.EDGE_ENHANCE_MORE if edge_enhance > 1 else ImageFilter.EDGE_ENHANCE
+            img_edges = img_small.filter(edge_filter)
+            img_small = Image.blend(img_small, img_edges, alpha=edge_enhance / 2.0)
+
+        self.processed_image = img_small
+
+        img_preview = img_small.resize((700, 700), Image.NEAREST)
+        img_preview = ImageOps.expand(img_preview, border=2, fill="white")
+        img_preview = img_preview.resize((700, 700), Image.NEAREST)
+
+        img_tk = ImageTk.PhotoImage(img_preview)
+        self.current_preview_img = img_tk
+        self.current_preview_img_full = img_preview
+
+        self.preview_label.configure(image=img_tk)
+        self.preview_label.image = img_tk
+        self.preview_label.place(x=0, y=0, width=700, height=700)
+
+        if self.use_text_widget:
+            self.draw_ascii_on_text(grid_size)
+        else:
+            self.draw_ascii_on_canvas(grid_size)
+
+    def draw_ascii_on_canvas(self, grid_size):
+        if self.processed_image is None:
+            return
+
+        pixels = self.processed_image.load()
+        width, height = self.processed_image.size
+        invert = self.invert_var.get()
+
+        self.text_canvas.delete("all")
+        self.ascii_text = ""
+
+        font_size = max(int(700 / grid_size), 6)
+        font = ("Courier New", font_size)
+        x_offset = 0
+        y_offset = 0
+
+        for y in range(height):
+            line_chars = []
+            for x in range(width):
+                r, g, b = pixels[x, y]
+                brightness = (r + g + b) / 3
+                threshold = self.threshold_var.get()
+                char = FILLED if (brightness < threshold) != invert else EMPTY
+
+                line_chars.append(char)
+
+                self.text_canvas.create_text(
+                    x * font_size + x_offset,
+                    y * font_size + y_offset,
+                    text=char,
+                    font=font,
+                    fill="#eee",
+                    anchor="nw"
+                )
+            line_str = "".join(line_chars)
+            self.ascii_text += line_str + "\n"
+
+        self.text_canvas.config(scrollregion=(0, 0, width * font_size, height * font_size))
+
+    def draw_ascii_on_text(self, grid_size):
+        if self.processed_image is None:
+            return
+
+        pixels = self.processed_image.load()
+        width, height = self.processed_image.size
+        invert = self.invert_var.get()
+        threshold = self.threshold_var.get()
+
+        lines = []
+        for y in range(height):
+            line_chars = []
+            for x in range(width):
+                r, g, b = pixels[x, y]
+                brightness = (r + g + b) / 3
+                char = FILLED if (brightness < threshold) != invert else EMPTY
+                line_chars.append(char)
+            lines.append("".join(line_chars))
+
+        self.ascii_text = "\n".join(lines)
+
+        self.text_widget.delete("1.0", "end")
+        self.text_widget.insert("1.0", self.ascii_text)
+
+    def toggle_view(self):
+        self.use_text_widget = not self.use_text_widget
+        if self.use_text_widget:
+            self.text_canvas.pack_forget()
+            self.text_widget.pack(fill="both", expand=True)
+            self.update_preview()
+        else:
+            self.text_widget.pack_forget()
+            self.text_canvas.pack()
+            self.update_preview()
+
+    def copy_text(self):
+        if self.ascii_text:
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(self.ascii_text)
+                self.root.update()
+                tk.messagebox.showinfo("Copied", "ASCII art copied to clipboard!")
+            except Exception as e:
+                tk.messagebox.showerror("Error", f"Failed to copy: {e}")
+
+    def save_work(self):
+        if not self.ascii_text or self.current_preview_img_full is None or self.image is None:
+            tk.messagebox.showwarning("Warning", "Nothing to save!")
+            return
+
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        dir_path = f"saved_works/{timestamp}"
+        os.makedirs(dir_path)
+
+        with open(f"{dir_path}/ascii.txt", "w", encoding="utf-8") as f:
+            f.write(self.ascii_text)
+
+        self.current_preview_img_full.save(f"{dir_path}/preview.png")
+        self.image.save(f"{dir_path}/original.png")
+
+        settings = {
+            "grid_size": self.grid_size_var.get(),
+            "brightness": self.brightness_var.get(),
+            "contrast": self.contrast_var.get(),
+            "threshold": self.threshold_var.get(),
+            "sharpness": self.sharpness_var.get(),
+            "edge_enhance": self.edge_enhance_var.get(),
+            "invert": self.invert_var.get(),
+            "use_text_widget": self.use_text_widget,
+            "stretched": self.is_stretched  # Save stretch state
+        }
+        with open(f"{dir_path}/settings.json", "w") as f:
+            json.dump(settings, f)
+
+        tk.messagebox.showinfo("Saved", f"Work saved as {timestamp}")
+
+    def view_saved_works(self, btn):
+        # Destroy any existing dropdown
+        if hasattr(self, 'saved_dropdown') and self.saved_dropdown.winfo_exists():
+            self.saved_dropdown.destroy()
+
+        # Get button position (use the button argument directly)
+        try:
+            bx = btn.winfo_rootx()
+            by = btn.winfo_rooty() + btn.winfo_height()
+        except Exception:
+            bx, by = self.root.winfo_rootx() + 100, self.root.winfo_rooty() + 100
+
+        # Create dropdown Toplevel
+        self.saved_dropdown = Toplevel(self.root)
+        self.saved_dropdown.overrideredirect(True)
+        self.saved_dropdown.configure(bg="#222222")
+        self.saved_dropdown.geometry(f"740x600+{bx}+{by}")
+
+        # Close dropdown if focus is lost
+        self.saved_dropdown.bind("<FocusOut>", lambda e: self.saved_dropdown.destroy())
+        self.saved_dropdown.focus_set()
+
+        canvas = tk.Canvas(self.saved_dropdown, bg="#222222", highlightthickness=0)
+        scrollbar = Scrollbar(self.saved_dropdown, orient="vertical", command=canvas.yview, bg="#333333", troughcolor="#111111")
+        scroll_frame = tk.Frame(canvas, bg="#222222")
+
+        scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(
+                scrollregion=canvas.bbox("all")
+            )
+        )
+
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        self.saved_images = []
+        works = sorted(os.listdir("saved_works"), reverse=True)
+
+        self.delete_confirm = {}  # Track which work is in confirm state
+
+        for work in works:
+            work_frame = tk.Frame(scroll_frame, bg="#333333", bd=1, relief="solid")
+            work_frame.pack(fill="x", pady=5, padx=10)
+
+            time_label = tk.Label(work_frame, text=work, bg="#333333", fg="#eee", font=("Arial", 12, "bold"))
+            time_label.pack(side="left", padx=10)
+
+            preview_path = f"saved_works/{work}/preview.png"
+            if os.path.exists(preview_path):
+                img = Image.open(preview_path).resize((100, 100), Image.NEAREST)
+                img_tk = ImageTk.PhotoImage(img)
+                self.saved_images.append(img_tk)
+                preview_label = tk.Label(work_frame, image=img_tk, bg="#333333")
+                preview_label.pack(side="left", padx=10)
+
+            load_btn = tk.Button(work_frame, text="Load", command=lambda w=work: self.load_work(w, self.saved_dropdown),
+                                 bg="#175620", fg="#B1F5CE", relief="flat")
+            load_btn.pack(side="right", padx=10)
+
+            # Inline delete confirmation
+            def make_delete_handler(w, btn_ref):
+                def handler():
+                    if self.delete_confirm.get(w, False):
+                        self.delete_confirm[w] = False
+                        self.delete_work(w, self.saved_dropdown)
+                    else:
+                        # Reset all others
+                        for k in self.delete_confirm:
+                            self.delete_confirm[k] = False
+                        # Set this one
+                        self.delete_confirm[w] = True
+                        btn_ref.config(text="Are you sure?", bg="#a33")
+                        # Reset after 2 seconds if not pressed again
+                        btn_ref.after(2000, lambda: (btn_ref.config(text="Delete", bg="#561717"), self.delete_confirm.update({w: False})))
+                return handler
+
+            delete_btn = tk.Button(work_frame, text="Delete", bg="#561717", fg="#eee", relief="flat")
+            delete_btn.config(command=make_delete_handler(work, delete_btn))
+            delete_btn.pack(side="right", padx=10)
+
+    def load_work(self, work, window):
+        dir_path = f"saved_works/{work}"
+
+        original_path = f"{dir_path}/original.png"
+        if os.path.exists(original_path):
+            self.image = Image.open(original_path).convert("RGB")
+
+        settings_path = f"{dir_path}/settings.json"
+        if os.path.exists(settings_path):
+            with open(settings_path, "r") as f:
+                settings = json.load(f)
+            self.grid_size_var.set(settings.get("grid_size", 50))
+            self.brightness_var.set(settings.get("brightness", 1.0))
+            self.contrast_var.set(settings.get("contrast", 1.0))
+            self.threshold_var.set(settings.get("threshold", 128))
+            self.sharpness_var.set(settings.get("sharpness", 1.0))
+            self.edge_enhance_var.set(settings.get("edge_enhance", 0.0))
+            self.invert_var.set(settings.get("invert", False))
+            self.use_text_widget = settings.get("use_text_widget", False)
+            self.is_stretched = settings.get("stretched", False)  # Restore stretch state
+
+            if self.is_stretched:
+                self.stretched_image = self.image.resize((700, 700), Image.LANCZOS)
+
+            if self.use_text_widget:
+                self.text_canvas.pack_forget()
+                self.text_widget.pack(fill="both", expand=True)
+            else:
+                self.text_widget.pack_forget()
+                self.text_canvas.pack()
+
+        self.update_preview()
+        if window:
+            window.destroy()
+            tk.messagebox.showinfo("Loaded", f"Work {work} loaded!")
+
+    def delete_work(self, work, window):
+        import shutil
+        shutil.rmtree(f"saved_works/{work}")
+        self.view_saved_works(self.view_saved_btn)
+
+    def stretch_to_canvas(self, mode="fill"):
+        if self.image is None:
+            tk.messagebox.showwarning("Warning", "No image loaded!")
+            return
+
+        img = self.image
+        if mode == "fill":
+            # Stretch to exactly 700x700 (may distort)
+            stretched = img.resize((700, 700), Image.LANCZOS)
+        elif mode == "fit":
+            # Fit inside 700x700, keep aspect
+            ratio = min(700 / img.width, 700 / img.height)
+            new_size = (int(img.width * ratio), int(img.height * ratio))
+            stretched = img.resize(new_size, Image.LANCZOS)
+            # Paste centered on 700x700
+            bg = Image.new("RGB", (700, 700), (0, 0, 0))
+            bg.paste(stretched, ((700 - new_size[0]) // 2, (700 - new_size[1]) // 2))
+            stretched = bg
+        elif mode == "width":
+            # Fit width to 700, keep aspect
+            ratio = 700 / img.width
+            new_size = (700, int(img.height * ratio))
+            stretched = img.resize(new_size, Image.LANCZOS)
+            # Paste centered vertically
+            bg = Image.new("RGB", (700, 700), (0, 0, 0))
+            bg.paste(stretched, (0, (700 - new_size[1]) // 2))
+            stretched = bg
+        elif mode == "height":
+            # Fit height to 700, keep aspect
+            ratio = 700 / img.height
+            new_size = (int(img.width * ratio), 700)
+            stretched = img.resize(new_size, Image.LANCZOS)
+            # Paste centered horizontally
+            bg = Image.new("RGB", (700, 700), (0, 0, 0))
+            bg.paste(stretched, ((700 - new_size[0]) // 2, 0))
+            stretched = bg
+        else:
+            return
+
+        self.stretched_image = stretched
+        self.is_stretched = True
+        self.update_preview(stretched=True)
+
+    def refresh_saved_works_menu(self):
+        menu = self.saved_works_menu["menu"]
+        menu.delete(0, "end")
+        works = sorted(os.listdir("saved_works"), reverse=True)
+        if not works:
+            menu.add_command(label="No saves yet", command=lambda: None)
+            self.saved_works_var.set("No saves yet")
+        else:
+            for work in works:
+                menu.add_command(label=work, command=lambda w=work: self.saved_works_var.set(w))
+            self.saved_works_var.set("Select saved work")
+
+    def load_selected_work(self, selected):
+        if selected and selected != "No saves yet" and selected != "Select saved work":
+            self.load_work(selected, window=None)
+
+
+root = tk.Tk()
+app = PixelArtApp(root)
+root.mainloop()
